@@ -649,14 +649,62 @@ class ChatApp(QMainWindow):
                 self.chat_header_label.setText(f"💬 {dialog['name']}")
             else:
                 self.chat_header_label.setText("Chat")
+            # Сначала загружаем из БД, затем запрашиваем историю из Telegram
             self.load_chat_history(chat_id)
             self.db.reset_unread_count(chat_id)
             self.refresh_chat_list()
+            # Загружаем последние 100 сообщений из Telegram
+            self.load_telegram_history(chat_id)
 
     def load_chat_history(self, chat_id):
         self.messages_area.clear()
         for msg in self.db.get_chat_history(chat_id):
             self.display_message(msg)
+
+    def load_telegram_history(self, chat_id):
+        """Загрузка последних 100 сообщений из Telegram API"""
+        if self.telegram_thread and self.telegram_thread.loop and self.telegram_thread.client.client:
+            asyncio.run_coroutine_threadsafe(
+                self._fetch_telegram_history(int(chat_id)),
+                self.telegram_thread.loop
+            )
+
+    async def _fetch_telegram_history(self, chat_id):
+        """Асинхронная загрузка истории из Telegram"""
+        try:
+            messages = await self.telegram_thread.client.get_chat_history(chat_id, limit=100)
+            # Сохраняем в БД и отображаем
+            for msg in reversed(messages):  # Reversed чтобы старые сообщения были сверху
+                sender_name = getattr(msg.sender, 'first_name', 'Unknown') if hasattr(msg, 'sender') and msg.sender else 'Unknown'
+                sender_id = msg.sender_id if hasattr(msg, 'sender_id') else 0
+                
+                # Сохраняем в БД (если еще не сохранено)
+                self.db.save_message(
+                    chat_id=str(chat_id),
+                    message_id=msg.id,
+                    sender_id=sender_id,
+                    text=msg.text or '',
+                    is_outgoing=1 if msg.out else 0,
+                    timestamp=msg.date.strftime("%Y-%m-%d %H:%M:%S") if hasattr(msg, 'date') and msg.date else None
+                )
+                
+                # Отображаем в UI
+                msg_data = {
+                    'text': msg.text or '',
+                    'sender_name': sender_name,
+                    'is_outgoing': msg.out,
+                    'timestamp': msg.date.strftime("%Y-%m-%d %H:%M:%S") if hasattr(msg, 'date') and msg.date else None,
+                    'first_name': sender_name
+                }
+                # Используем invokeLater для безопасного обновления UI из другого потока
+                from PyQt5.QtCore import QTimer
+                QTimer.singleShot(0, lambda m=msg_data: self.display_message(m))
+                
+                # Небольшая пауза между сообщениями для предотвращения блокировки UI
+                await asyncio.sleep(0.01)
+                
+        except Exception as e:
+            logger.error(f"Error loading Telegram history: {e}")
 
     def display_message(self, msg):
         """Красивое отображение сообщений в стиле Telegram"""
