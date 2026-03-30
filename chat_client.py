@@ -2,15 +2,13 @@ import sys
 import asyncio
 import os
 import time
-import ctypes
-from ctypes import wintypes
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
-                             QHBoxLayout, QListWidget, QTextEdit, QLineEdit,
+                             QHBoxLayout, QListWidget, QLineEdit,
                              QPushButton, QSplitter, QMessageBox, QInputDialog,
                              QFileDialog, QLabel, QListWidgetItem, QFrame, 
-                             QGraphicsDropShadowEffect, QScrollArea)
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QPropertyAnimation, QEasingCurve, QObject
-from PyQt5.QtGui import QFont, QTextCursor, QIcon, QPalette, QColor, QPixmap, QPainter
+                             QScrollArea)
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize
+from PyQt5.QtGui import QFont
 from plyer import notification
 from database import Database
 from telegram_client import TelegramClientWrapper
@@ -20,80 +18,124 @@ from datetime import datetime
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# WinAPI для системных уведомлений
-class WindowsNotifier:
-    """Класс для отправки уведомлений через WinAPI"""
-    
-    @staticmethod
-    def send_notification(title, message, icon_path=None):
-        try:
-            # Пробуем использовать ctypes для вызова Windows Toast через Shell
-            # Это более надежный способ чем COM
-            import subprocess
-            # Создаем PowerShell скрипт для уведомления
-            ps_script = f'''
-            [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
-            [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
-            
-            $template = @"
-<toast>
-    <visual>
-        <binding template="ToastText02">
-            <text id="1">{title}</text>
-            <text id="2">{message[:200]}</text>
-        </binding>
-    </visual>
-</toast>
-"@
-            
-            $xml = New-Object Windows.Data.Xml.Dom.XmlDocument
-            $xml.LoadXml($template)
-            $toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
-            [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("Telegram Messenger").Show($toast)
-            '''
-            subprocess.run(['powershell', '-ExecutionPolicy', 'Bypass', '-Command', ps_script], 
-                          capture_output=True, timeout=5)
-            return True
-        except Exception as e:
-            logger.debug(f"PowerShell notification error: {e}")
-            # Fallback на plyer
-            try:
-                notification.notify(
-                    title=title,
-                    message=message[:200],
-                    app_name="Telegram Messenger",
-                    timeout=5
-                )
-                return True
-            except Exception as e2:
-                logger.debug(f"Plyer notification error: {e2}")
-                # Если все методы не работают, просто логируем
-                logger.info(f"Notification: {title} - {message[:100]}")
-                return False
+
+class ChatListItem(QWidget):
+    def __init__(self, name, last_message, unread_count, timestamp=""):
+        super().__init__()
+        self.setFixedHeight(80)
+        self.setup_ui(name, last_message, unread_count, timestamp)
+        
+    def setup_ui(self, name, last_message, unread_count, timestamp):
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(12)
+        
+        avatar_label = QLabel(name[0].upper() if name else "?")
+        avatar_label.setFixedSize(48, 48)
+        avatar_label.setAlignment(Qt.AlignCenter)
+        avatar_label.setStyleSheet("QLabel { background-color: #3390ec; color: white; border-radius: 24px; font-size: 20px; font-weight: bold; }")
+        layout.addWidget(avatar_label)
+        
+        text_container = QWidget()
+        text_layout = QVBoxLayout(text_container)
+        text_layout.setContentsMargins(0, 0, 0, 0)
+        text_layout.setSpacing(4)
+        
+        header_layout = QHBoxLayout()
+        name_label = QLabel(name)
+        name_label.setStyleSheet("font-size: 15px; font-weight: 600; color: #222222;")
+        header_layout.addWidget(name_label)
+        header_layout.addStretch()
+        if timestamp:
+            time_label = QLabel(timestamp)
+            time_label.setStyleSheet("font-size: 12px; color: #999999;")
+            header_layout.addWidget(time_label)
+        text_layout.addLayout(header_layout)
+        
+        msg_label = QLabel(last_message[:60] + "..." if len(last_message) > 60 else last_message)
+        msg_label.setStyleSheet("font-size: 13px; color: #888888;")
+        text_layout.addWidget(msg_label)
+        text_layout.addStretch()
+        layout.addWidget(text_container, 1)
+        
+        if unread_count > 0:
+            unread_badge = QLabel(str(unread_count))
+            unread_badge.setFixedSize(22, 22)
+            unread_badge.setAlignment(Qt.AlignCenter)
+            unread_badge.setStyleSheet("QLabel { background-color: #3390ec; color: white; border-radius: 11px; font-size: 12px; font-weight: bold; }")
+            layout.addWidget(unread_badge)
+        
+        self.setStyleSheet("ChatListItem { background-color: white; border-bottom: 1px solid #f0f0f0; } ChatListItem:hover { background-color: #f5f5f5; }")
 
 
-class MessageWorker(QThread):
-    """Фоновый воркер для обработки входящих сообщений"""
-    message_processed = pyqtSignal(dict)
-    
+class MessageBubble(QFrame):
+    def __init__(self, text, sender_name, is_outgoing, timestamp):
+        super().__init__()
+        self.is_outgoing = is_outgoing
+        self.setup_ui(text, sender_name, timestamp)
+        
+    def setup_ui(self, text, sender_name, timestamp):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setSpacing(4)
+        
+        if not self.is_outgoing and sender_name:
+            name_label = QLabel(sender_name)
+            name_label.setStyleSheet("font-size: 13px; font-weight: 600; color: #3390ec; padding-left: 8px;")
+            layout.addWidget(name_label)
+        
+        bubble = QFrame()
+        bubble_layout = QVBoxLayout(bubble)
+        bubble_layout.setContentsMargins(14, 10, 14, 10)
+        
+        text_label = QLabel(text)
+        text_label.setWordWrap(True)
+        text_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        text_label.setStyleSheet("font-size: 14px; color: #000000; line-height: 1.4;")
+        bubble_layout.addWidget(text_label)
+        
+        if timestamp:
+            time_str = timestamp.split(" ")[1][:5] if " " in timestamp else timestamp
+            time_label = QLabel(time_str)
+            time_label.setAlignment(Qt.AlignRight)
+            color = "#ffffff" if self.is_outgoing else "#999999"
+            time_label.setStyleSheet("font-size: 11px; color: " + color + "; margin-top: 4px;")
+            bubble_layout.addWidget(time_label)
+        
+        if self.is_outgoing:
+            bubble.setStyleSheet("QFrame { background-color: #eeffde; border-radius: 16px; border-top-right-radius: 4px; }")
+        else:
+            bubble.setStyleSheet("QFrame { background-color: #ffffff; border-radius: 16px; border-top-left-radius: 4px; border: 1px solid #e8e8e8; }")
+        
+        layout.addWidget(bubble)
+
+
+class MessageScrollArea(QScrollArea):
     def __init__(self):
         super().__init__()
-        self.message_queue = []
-        self.running = True
-    
-    def add_message(self, message):
-        self.message_queue.append(message)
-    
-    def run(self):
-        while self.running:
-            if self.message_queue:
-                msg = self.message_queue.pop(0)
-                self.message_processed.emit(msg)
-            else:
-                self.msleep(50)
-    
-    def stop(self):
-        self.running = False
+        self.setWidgetResizable(True)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setStyleSheet("QScrollArea { border: none; background-color: #f5f5f5; } QScrollBar:vertical { background-color: transparent; width: 8px; border-radius: 4px; } QScrollBar::handle:vertical { background-color: #d0d0d0; border-radius: 4px; min-height: 20px; } QScrollBar::handle:vertical:hover { background-color: #b0b0b0; } QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }")
+        
+        self.container = QWidget()
+        self.container_layout = QVBoxLayout(self.container)
+        self.container_layout.setContentsMargins(16, 16, 16, 16)
+        self.container_layout.setSpacing(8)
+        self.container_layout.addStretch()
+        self.setWidget(self.container)
+        
+    def add_message(self, text, sender_name, is_outgoing, timestamp):
+        bubble = MessageBubble(text, sender_name, is_outgoing, timestamp)
+        self.container_layout.insertWidget(self.container_layout.count() - 1, bubble)
+        scrollbar = self.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+        
+    def clear_messages(self):
+        while self.container_layout.count() > 1:
+            item = self.container_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
 
 class TelegramThread(QThread):
     message_received = pyqtSignal(dict)
@@ -115,44 +157,24 @@ class TelegramThread(QThread):
         self.code_event = asyncio.Event()
         self.password_event = asyncio.Event()
         self._stop_requested = False
-        self._code_requested = False
-        self._password_requested = False
 
     def set_code(self, code):
         self.code = code
-        if self._code_requested:
-            self.code_event.set()
+        self.code_event.set()
 
     def set_password(self, password):
         self.password = password
-        if self._password_requested:
-            self.password_event.set()
-
-    def reset_code_event(self):
-        self.code_event.clear()
-        self.code = None
-        self._code_requested = False
-
-    def reset_password_event(self):
-        self.password_event.clear()
-        self.password = None
-        self._password_requested = False
+        self.password_event.set()
 
     async def get_code_async(self):
-        # Сначала сигнализируем UI, что нужен код
-        self._code_requested = True
         self.code_event.clear()
         self.need_code.emit()
-        # Ждем пока пользователь введет код
         await self.code_event.wait()
         return self.code
 
     async def get_password_async(self):
-        # Сначала сигнализируем UI, что нужен пароль
-        self._password_requested = True
         self.password_event.clear()
         self.need_password.emit()
-        # Ждем пока пользователь введет пароль
         await self.password_event.wait()
         return self.password
 
@@ -163,27 +185,23 @@ class TelegramThread(QThread):
         try:
             while True:
                 try:
-                    await self.client.start(
-                        self.phone,
-                        self.get_code_async,
-                        self.get_password_async
-                    )
-                    break  # Успешный вход
+                    await self.client.start(self.phone, self.get_code_async, self.get_password_async)
+                    break
                 except Exception as e:
                     err = str(e)
                     if err == "CODE_INVALID":
-                        self.reset_code_event()
-                        # need_code уже был вызван в get_code_async, просто ждем новый код
+                        self.code_event.clear()
+                        self.code = None
                         continue
                     elif err == "PASSWORD_INVALID":
-                        self.reset_password_event()
-                        # need_password уже был вызван в get_password_async
+                        self.password_event.clear()
+                        self.password = None
                         continue
-                    elif err == "PASSWORD_REQUIRED":
-                        # need_password будет вызван в get_password_async
+                    elif err in ("PASSWORD_REQUIRED",):
                         continue
                     else:
                         raise e
+            
             self.client.message_callback = self.on_message
             self.loop = asyncio.get_running_loop()
             self.login_success.emit()
@@ -193,66 +211,48 @@ class TelegramThread(QThread):
             self.login_error.emit(str(e))
 
     async def _refresh_dialogs_periodically(self):
-        """Периодическое обновление списка чатов каждые 0.5 секунды"""
         last_dialogs = None
         consecutive_flood_waits = 0
         while not self._stop_requested:
             try:
-                # Получаем диалоги с ограничением по времени для предотвращения flood wait
                 dialogs = await self.client.get_dialogs(limit=50)
-                
-                # Сбрасываем счетчик flood wait при успехе
                 consecutive_flood_waits = 0
-                
-                # Отправляем только если есть изменения (оптимизация трафика)
                 if dialogs != last_dialogs:
                     self.dialogs_ready.emit(dialogs)
                     last_dialogs = dialogs
             except Exception as e:
                 err_str = str(e)
                 if "flood wait" in err_str.lower():
-                    # При flood wait увеличиваем интервал
                     consecutive_flood_waits += 1
-                    logger.warning(f"Flood wait detected (count: {consecutive_flood_waits}): {e}")
-                    # Ждем дольше при каждом последующем flood wait, но не более 60 секунд
+                    logger.warning("Flood wait (count: %d): %s", consecutive_flood_waits, e)
                     wait_time = min(5 * consecutive_flood_waits, 60)
                     await asyncio.sleep(wait_time)
                     continue
                 else:
-                    logger.error(f"Error fetching dialogs: {e}")
-                    # При других ошибках тоже делаем паузу
+                    logger.error("Error fetching dialogs: %s", e)
                     await asyncio.sleep(2)
-            await asyncio.sleep(0.5)  # Обновление каждые 0.5 секунды
+            await asyncio.sleep(0.5)
 
     async def on_message(self, message):
         self.message_received.emit(message)
 
     def send_message(self, chat_id, text, file_path=None):
         if self.loop and self.client.client:
-            asyncio.run_coroutine_threadsafe(
-                self.client.send_message(chat_id, text, file_path),
-                self.loop
-            )
+            asyncio.run_coroutine_threadsafe(self.client.send_message(chat_id, text, file_path), self.loop)
 
     def request_dialogs_now(self):
         if self.loop and self.client.client:
-            asyncio.run_coroutine_threadsafe(
-                self._refresh_dialogs_once(),
-                self.loop
-            )
+            asyncio.run_coroutine_threadsafe(self._refresh_dialogs_once(), self.loop)
 
     async def _refresh_dialogs_once(self):
         dialogs = await self.client.get_dialogs()
         self.dialogs_ready.emit(dialogs)
 
-    def disconnect(self):
+    def stop(self):
         self._stop_requested = True
         if self.loop and self.client.client:
             asyncio.run_coroutine_threadsafe(self.client.disconnect(), self.loop)
 
-    def stop(self):
-        self._stop_requested = True
-        self.disconnect()
 
 class ChatApp(QMainWindow):
     def __init__(self, api_id, api_hash):
@@ -261,98 +261,20 @@ class ChatApp(QMainWindow):
         self.api_hash = api_hash
         self.db = Database()
         self.telegram_thread = None
-        self.message_worker = None  # Фоновый воркер для обработки сообщений
         self.current_chat_id = None
         self.dialogs_cache = {}
-        self.last_message_ids = set()  # Для предотвращения дублирования сообщений
         self.init_ui()
-        # Не запускаем логин сразу - дадим приложению инициализироваться
-        # start_login будет вызван после показа окна через QTimer.singleShot
-        from PyQt5.QtCore import QTimer
         QTimer.singleShot(100, self.start_login)
 
     def init_ui(self):
-        self.setWindowTitle("Telegram Messenger (via Proxy)")
-        self.setGeometry(100, 100, 1200, 800)
+        self.setWindowTitle("Telegram Messenger")
+        self.setGeometry(100, 100, 1400, 900)
+        self.setMinimumSize(1200, 800)
+        self.setStyleSheet("QMainWindow { background-color: #ffffff; }")
         
-        # Применяем современный стиль
-        self.setStyleSheet("""
-            QMainWindow {
-                background-color: #f5f5f5;
-            }
-            QListWidget {
-                border: none;
-                background-color: #ffffff;
-                font-size: 14px;
-                padding: 5px;
-            }
-            QListWidget::item {
-                padding: 12px;
-                border-bottom: 1px solid #e0e0e0;
-            }
-            QListWidget::item:selected {
-                background-color: #3390ec;
-                color: white;
-            }
-            QListWidget::item:hover {
-                background-color: #e3f2fd;
-            }
-            QTextEdit {
-                border: none;
-                background-color: #ffffff;
-                font-size: 14px;
-                padding: 10px;
-            }
-            QLineEdit {
-                border: 2px solid #e0e0e0;
-                border-radius: 20px;
-                padding: 10px 15px;
-                font-size: 14px;
-                background-color: #ffffff;
-            }
-            QLineEdit:focus {
-                border: 2px solid #3390ec;
-            }
-            QPushButton {
-                background-color: #3390ec;
-                color: white;
-                border: none;
-                border-radius: 20px;
-                padding: 10px 25px;
-                font-size: 14px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #2885db;
-            }
-            QPushButton:pressed {
-                background-color: #1e73c7;
-            }
-            QSplitter::handle {
-                background-color: #e0e0e0;
-                width: 1px;
-            }
-            QScrollBar:vertical {
-                background-color: #f5f5f5;
-                width: 10px;
-                border-radius: 5px;
-            }
-            QScrollBar::handle:vertical {
-                background-color: #c0c0c0;
-                border-radius: 5px;
-                min-height: 20px;
-            }
-            QScrollBar::handle:vertical:hover {
-                background-color: #a0a0a0;
-            }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
-                height: 0px;
-            }
-        """)
-        
-        central = QWidget()
-        self.setCentralWidget(central)
-        main_layout = QHBoxLayout(central)
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        main_layout = QHBoxLayout(central_widget)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
         
@@ -360,176 +282,144 @@ class ChatApp(QMainWindow):
         splitter.setHandleWidth(1)
         main_layout.addWidget(splitter)
         
-        # Левая панель - список чатов
-        left_widget = QWidget()
-        left_widget.setStyleSheet("background-color: #ffffff;")
-        left_layout = QVBoxLayout(left_widget)
-        left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(0)
+        left_panel = self.create_left_panel()
+        splitter.addWidget(left_panel)
         
-        # Заголовок
-        header_label = QLabel("Chats")
-        header_label.setStyleSheet("""
-            QLabel {
-                background-color: #3390ec;
-                color: white;
-                font-size: 18px;
-                font-weight: bold;
-                padding: 15px;
-            }
-        """)
-        left_layout.addWidget(header_label)
+        right_panel = self.create_right_panel()
+        splitter.addWidget(right_panel)
+        
+        splitter.setSizes([400, 1000])
+
+    def create_left_panel(self):
+        widget = QWidget()
+        widget.setStyleSheet("background-color: #ffffff;")
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        
+        header = QWidget()
+        header.setStyleSheet("QWidget { background-color: #ffffff; border-bottom: 1px solid #e8e8e8; }")
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(20, 16, 20, 16)
+        title_label = QLabel("Chats")
+        title_label.setStyleSheet("font-size: 24px; font-weight: 700; color: #222222;")
+        header_layout.addWidget(title_label)
+        header_layout.addStretch()
+        layout.addWidget(header)
+        
+        search_container = QWidget()
+        search_container.setStyleSheet("QWidget { background-color: #f5f5f5; margin: 12px 16px; border-radius: 12px; }")
+        search_layout = QHBoxLayout(search_container)
+        search_layout.setContentsMargins(16, 10, 16, 10)
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("Search chats...")
+        self.search_input.setStyleSheet("QLineEdit { border: none; background-color: transparent; font-size: 14px; color: #333333; } QLineEdit:focus { outline: none; }")
+        search_layout.addWidget(self.search_input)
+        layout.addWidget(search_container)
         
         self.chat_list = QListWidget()
+        self.chat_list.setStyleSheet("QListWidget { border: none; background-color: #ffffff; outline: none; } QListWidget::item { padding: 0px; border-bottom: 1px solid #f0f0f0; } QListWidget::item:selected { background-color: #e3f2fd; } QListWidget::item:hover { background-color: #f5f5f5; }")
         self.chat_list.itemClicked.connect(self.on_chat_selected)
-        left_layout.addWidget(self.chat_list)
+        layout.addWidget(self.chat_list)
+        return widget
+
+    def create_right_panel(self):
+        widget = QWidget()
+        widget.setStyleSheet("background-color: #f0f2f5;")
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
         
-        splitter.addWidget(left_widget)
+        chat_header = QWidget()
+        chat_header.setStyleSheet("QWidget { background-color: #ffffff; border-bottom: 1px solid #e8e8e8; }")
+        header_layout = QHBoxLayout(chat_header)
+        header_layout.setContentsMargins(20, 14, 20, 14)
         
-        # Правая панель - чат
-        right = QWidget()
-        right.setStyleSheet("background-color: #f5f5f5;")
-        right_layout = QVBoxLayout(right)
-        right_layout.setContentsMargins(15, 15, 15, 15)
-        right_layout.setSpacing(10)
-        splitter.addWidget(right)
+        self.chat_avatar = QLabel("")
+        self.chat_avatar.setFixedSize(42, 42)
+        self.chat_avatar.setAlignment(Qt.AlignCenter)
+        self.chat_avatar.setStyleSheet("QLabel { background-color: #3390ec; color: white; border-radius: 21px; font-size: 18px; font-weight: bold; }")
+        header_layout.addWidget(self.chat_avatar)
         
-        # Область сообщений с заголовком
-        chat_header = QLabel("")
-        chat_header.setStyleSheet("""
-            QLabel {
-                background-color: #ffffff;
-                color: #333333;
-                font-size: 16px;
-                font-weight: bold;
-                padding: 12px;
-                border-radius: 10px;
-            }
-        """)
-        right_layout.addWidget(chat_header)
+        info_container = QWidget()
+        info_layout = QVBoxLayout(info_container)
+        info_layout.setContentsMargins(0, 0, 0, 0)
+        info_layout.setSpacing(2)
+        self.chat_title_label = QLabel("Select a chat")
+        self.chat_title_label.setStyleSheet("font-size: 16px; font-weight: 600; color: #222222;")
+        info_layout.addWidget(self.chat_title_label)
+        self.chat_status_label = QLabel("")
+        self.chat_status_label.setStyleSheet("font-size: 13px; color: #888888;")
+        info_layout.addWidget(self.chat_status_label)
+        header_layout.addWidget(info_container)
+        header_layout.addStretch()
+        layout.addWidget(chat_header)
         
-        self.messages_area = QTextEdit()
-        self.messages_area.setReadOnly(True)
-        self.messages_area.setFont(QFont("Segoe UI", 11))
-        self.messages_area.setStyleSheet("""
-            QTextEdit {
-                border: 1px solid #e0e0e0;
-                border-radius: 10px;
-                background-color: #ffffff;
-                padding: 10px;
-            }
-        """)
-        right_layout.addWidget(self.messages_area)
+        self.messages_scroll = MessageScrollArea()
+        layout.addWidget(self.messages_scroll, 1)
         
-        input_layout = QHBoxLayout()
-        input_layout.setSpacing(10)
+        input_container = QWidget()
+        input_container.setStyleSheet("QWidget { background-color: #ffffff; border-top: 1px solid #e8e8e8; }")
+        input_layout = QHBoxLayout(input_container)
+        input_layout.setContentsMargins(16, 12, 16, 12)
+        input_layout.setSpacing(12)
         
-        self.attach_button = QPushButton("📎")
-        self.attach_button.setFixedSize(50, 50)
-        self.attach_button.clicked.connect(self.attach_file)
-        input_layout.addWidget(self.attach_button)
+        attach_btn = QPushButton("Attach")
+        attach_btn.setFixedSize(44, 44)
+        attach_btn.setCursor(Qt.PointingHandCursor)
+        attach_btn.clicked.connect(self.attach_file)
+        attach_btn.setStyleSheet("QPushButton { background-color: #f5f5f5; border: none; border-radius: 22px; font-size: 14px; } QPushButton:hover { background-color: #e8e8e8; }")
+        input_layout.addWidget(attach_btn)
         
         self.message_input = QLineEdit()
-        self.message_input.setPlaceholderText("Type a message...")
+        self.message_input.setPlaceholderText("Write a message...")
+        self.message_input.setMinimumHeight(44)
         self.message_input.returnPressed.connect(self.send_message)
-        input_layout.addWidget(self.message_input)
+        self.message_input.setStyleSheet("QLineEdit { border: none; background-color: #f5f5f5; border-radius: 22px; padding: 0px 20px; font-size: 14px; color: #333333; } QLineEdit:focus { outline: none; background-color: #eeeeee; }")
+        input_layout.addWidget(self.message_input, 1)
         
         self.send_button = QPushButton("Send")
-        self.send_button.setFixedSize(80, 50)
+        self.send_button.setFixedSize(44, 44)
+        self.send_button.setCursor(Qt.PointingHandCursor)
         self.send_button.clicked.connect(self.send_message)
+        self.send_button.setStyleSheet("QPushButton { background-color: #3390ec; color: white; border: none; border-radius: 22px; font-size: 14px; font-weight: bold; } QPushButton:hover { background-color: #2885db; } QPushButton:pressed { background-color: #1e73c7; }")
         input_layout.addWidget(self.send_button)
         
-        right_layout.addLayout(input_layout)
-        
-        splitter.setSizes([350, 850])
-        
-        self.chat_header_label = chat_header
-        
-        self.refresh_timer = QTimer()
-        self.refresh_timer.timeout.connect(self.refresh_chat_list)
-        self.refresh_timer.start(5000)
+        layout.addWidget(input_container)
+        return widget
 
     def start_login(self):
-        phone, ok = QInputDialog.getText(self, "Login", "Enter phone number (e.g., +71234567890):")
+        phone, ok = QInputDialog.getText(self, "Login", "Enter your phone number (e.g., +79991234567):")
         if not ok or not phone:
             sys.exit(0)
         
-        # Запускаем фоновый воркер для обработки сообщений
-        self.message_worker = MessageWorker()
-        self.message_worker.message_processed.connect(self.process_message_from_worker)
-        self.message_worker.start()
-        
         self.telegram_thread = TelegramThread(self.api_id, self.api_hash, phone)
+        self.telegram_thread.message_received.connect(self.on_message_received)
         self.telegram_thread.login_success.connect(self.on_login_success)
         self.telegram_thread.login_error.connect(self.on_login_error)
-        self.telegram_thread.message_received.connect(self.on_message_received)
         self.telegram_thread.dialogs_ready.connect(self.on_dialogs_received)
         self.telegram_thread.need_code.connect(self.on_need_code)
         self.telegram_thread.need_password.connect(self.on_need_password)
         self.telegram_thread.start()
-        # Не запрашиваем код здесь - дождемся сигнала need_code
 
     def on_message_received(self, msg):
-        """Получение сообщения от Telegram и отправка в воркер"""
-        if self.message_worker:
-            self.message_worker.add_message(msg)
-    
-    def process_message_from_worker(self, msg):
-        """Обработка сообщения из фонового воркера"""
-        # Проверка на дублирование по ID
-        msg_key = f"{msg['chat_id']}_{msg['id']}"
-        if msg_key in self.last_message_ids:
-            return  # Пропускаем дубликат
-        self.last_message_ids.add(msg_key)
-        
-        # Ограничиваем размер множества ID
-        if len(self.last_message_ids) > 1000:
-            self.last_message_ids = set(list(self.last_message_ids)[-500:])
-        
-        # Сохраняем в БД
-        self.db.save_message(
-            chat_id=msg['chat_id'],
-            message_id=msg['id'],
-            sender_id=msg['sender_id'],
-            text=msg['text'],
-            media_path=msg.get('media_path', ''),
-            media_type=msg.get('media_type', ''),
-            is_outgoing=1 if msg.get('is_outgoing', False) else 0
-        )
-        self.db.save_user(
-            user_id=msg['sender_id'],
-            username=msg.get('sender_username', ''),
-            first_name=msg.get('sender_name', '')
-        )
-        
-        # Обновляем счетчик непрочитанных
-        if self.current_chat_id != msg['chat_id']:
-            self.db.increment_unread_count(msg['chat_id'])
-        
-        # Показываем уведомление через WinAPI
+        logger.info("Message received: %s", msg.get("text", "")[:50])
+        self.db.save_message(chat_id=msg["chat_id"], message_id=msg["id"], sender_id=msg.get("sender_id", 0), text=msg.get("text", ""), is_outgoing=0)
+        if self.current_chat_id != msg["chat_id"]:
+            self.db.increment_unread_count(msg["chat_id"])
         self.show_notification(msg)
-        
-        # Если чат открыт - отображаем сообщение
-        if self.current_chat_id == msg['chat_id']:
+        if self.current_chat_id == msg["chat_id"]:
             self.display_message(msg)
-        
-        # Обновляем список чатов
         self.refresh_chat_list()
 
     def on_need_code(self):
-        # Показываем диалог ввода кода
-        code, ok = QInputDialog.getText(self, "Verification Code", 
-            "Enter the verification code you received from Telegram:",
-            QLineEdit.Normal)
+        code, ok = QInputDialog.getText(self, "Verification Code", "Enter the verification code from Telegram:", QLineEdit.Normal)
         if not ok:
             sys.exit(0)
         self.telegram_thread.set_code(code)
 
     def on_need_password(self):
-        # Показываем диалог ввода пароля
-        pwd, ok = QInputDialog.getText(self, "Two-Factor Authentication", 
-            "Enter your two-factor authentication password:",
-            QLineEdit.Password)
+        pwd, ok = QInputDialog.getText(self, "Two-Factor Authentication", "Enter your 2FA password:", QLineEdit.Password)
         if not ok:
             sys.exit(0)
         self.telegram_thread.set_password(pwd)
@@ -539,8 +429,7 @@ class ChatApp(QMainWindow):
         self.telegram_thread.request_dialogs_now()
 
     def on_login_error(self, error_msg):
-        reply = QMessageBox.critical(self, "Error", f"Login failed: {error_msg}\n\nRetry?",
-                                     QMessageBox.Yes | QMessageBox.No)
+        reply = QMessageBox.critical(self, "Error", "Login failed: %s\n\nRetry?" % error_msg, QMessageBox.Yes | QMessageBox.No)
         if reply == QMessageBox.Yes:
             if self.telegram_thread:
                 self.telegram_thread.quit()
@@ -550,284 +439,130 @@ class ChatApp(QMainWindow):
             sys.exit(1)
 
     def on_dialogs_received(self, dialogs):
-        """Обновление списка чатов с красивым отображением"""
         self.chat_list.clear()
         self.dialogs_cache.clear()
         for dialog in dialogs:
             try:
-                chat_id = str(dialog['id'])
+                chat_id = str(dialog["id"])
                 self.dialogs_cache[chat_id] = dialog
                 unread = self.db.get_unread_count(chat_id)
-                
-                # Форматируем текст чата с последним сообщением
-                last_message = dialog.get('message', '')
-                if last_message and len(last_message) > 40:
-                    last_message = last_message[:37] + "..."
-                
-                # Создаем виджет для элемента списка
-                item_widget = QWidget()
-                item_widget.setStyleSheet("""
-                    QWidget {
-                        background-color: white;
-                        border-bottom: 1px solid #e0e0e0;
-                    }
-                    QWidget:hover {
-                        background-color: #e3f2fd;
-                    }
-                """)
-                item_layout = QVBoxLayout(item_widget)
-                item_layout.setContentsMargins(12, 8, 12, 8)
-                item_layout.setSpacing(4)
-                
-                # Название чата
-                name_label = QLabel(dialog['name'])
-                name_label.setStyleSheet("""
-                    QLabel {
-                        font-size: 14px;
-                        font-weight: bold;
-                        color: #333333;
-                    }
-                """)
-                item_layout.addWidget(name_label)
-                
-                # Последнее сообщение
-                if last_message:
-                    msg_label = QLabel(last_message)
-                    msg_label.setStyleSheet("""
-                        QLabel {
-                            font-size: 12px;
-                            color: #888888;
-                        }
-                    """)
-                    item_layout.addWidget(msg_label)
-                
-                # Счетчик непрочитанных
-                if unread > 0:
-                    unread_label = QLabel(f"✉️ {unread}")
-                    unread_label.setStyleSheet("""
-                        QLabel {
-                            font-size: 12px;
-                            color: #3390ec;
-                            font-weight: bold;
-                        }
-                    """)
-                    unread_label.setAlignment(Qt.AlignRight)
-                    item_layout.addWidget(unread_label)
-                
-                # Создаем элемент списка
+                last_message = dialog.get("message", "")
                 item = QListWidgetItem()
+                item.setSizeHint(QSize(0, 80))
+                item_widget = ChatListItem(name=dialog["name"], last_message=last_message, unread_count=unread, timestamp="")
                 item.setData(Qt.UserRole, chat_id)
-                item.setSizeHint(item_widget.sizeHint())
                 self.chat_list.addItem(item)
                 self.chat_list.setItemWidget(item, item_widget)
             except Exception as e:
-                logger.error(f"Error processing dialog: {e}")
-
-    def show_notification(self, msg):
-        """Показ уведомления через WinAPI или plyer"""
-        try:
-            title = f"New message from {msg.get('sender_name', 'Unknown')}"
-            message_text = msg.get('text', '')[:200] if msg.get('text') else "📎 Media file"
-            
-            # Используем WinAPI для уведомлений
-            WindowsNotifier.send_notification(title, message_text)
-        except Exception as e:
-            logger.error(f"Notification error: {e}")
-
-    def refresh_chat_list(self):
-        """Обновление списка чатов"""
-        if self.telegram_thread and self.telegram_thread.isRunning():
-            self.telegram_thread.request_dialogs_now()
+                logger.error("Error processing dialog: %s", e)
 
     def on_chat_selected(self, item):
         chat_id = item.data(Qt.UserRole)
-        if chat_id:
-            self.current_chat_id = chat_id
-            # Обновляем заголовок чата
-            if chat_id in self.dialogs_cache:
-                dialog = self.dialogs_cache[chat_id]
-                self.chat_header_label.setText(f"💬 {dialog['name']}")
-            else:
-                self.chat_header_label.setText("Chat")
-            # Сначала загружаем из БД, затем запрашиваем историю из Telegram
-            self.load_chat_history(chat_id)
-            self.db.reset_unread_count(chat_id)
-            self.refresh_chat_list()
-            # Загружаем последние 100 сообщений из Telegram
-            self.load_telegram_history(chat_id)
-
-    def load_chat_history(self, chat_id):
-        self.messages_area.clear()
-        for msg in self.db.get_chat_history(chat_id):
+        if not chat_id:
+            return
+        self.current_chat_id = chat_id
+        dialog = self.dialogs_cache.get(chat_id, {})
+        chat_name = dialog.get("name", "Chat")
+        self.chat_title_label.setText(chat_name)
+        self.chat_status_label.setText("online")
+        self.chat_avatar.setText(chat_name[0].upper() if chat_name else "?")
+        self.messages_scroll.clear_messages()
+        self.db.reset_unread_count(chat_id)
+        db_messages = self.db.get_chat_history(chat_id, limit=100)
+        for msg in db_messages:
             self.display_message(msg)
-
-    def load_telegram_history(self, chat_id):
-        """Загрузка последних 100 сообщений из Telegram API"""
-        if self.telegram_thread and self.telegram_thread.loop and self.telegram_thread.client.client:
-            asyncio.run_coroutine_threadsafe(
-                self._fetch_telegram_history(int(chat_id)),
-                self.telegram_thread.loop
-            )
+        if self.telegram_thread and self.telegram_thread.loop:
+            asyncio.run_coroutine_threadsafe(self._fetch_telegram_history(chat_id), self.telegram_thread.loop)
+        self.refresh_chat_list()
 
     async def _fetch_telegram_history(self, chat_id):
-        """Асинхронная загрузка истории из Telegram"""
         try:
             messages = await self.telegram_thread.client.get_chat_history(chat_id, limit=100)
-            # Сохраняем в БД и отображаем
-            for msg in reversed(messages):  # Reversed чтобы старые сообщения были сверху
-                sender_name = getattr(msg.sender, 'first_name', 'Unknown') if hasattr(msg, 'sender') and msg.sender else 'Unknown'
-                sender_id = msg.sender_id if hasattr(msg, 'sender_id') else 0
+            for msg in reversed(messages):
+                sender_name = msg.get("sender_name", "Unknown")
+                sender_id = msg.get("sender_id", 0)
+                msg_id = msg.get("id", 0)
+                msg_text = msg.get("text", "")
+                is_outgoing = msg.get("is_outgoing", False)
+                msg_date = msg.get("date")
                 
-                # Сохраняем в БД (если еще не сохранено)
-                self.db.save_message(
-                    chat_id=str(chat_id),
-                    message_id=msg.id,
-                    sender_id=sender_id,
-                    text=msg.text or '',
-                    is_outgoing=1 if msg.out else 0,
-                    timestamp=msg.date.strftime("%Y-%m-%d %H:%M:%S") if hasattr(msg, 'date') and msg.date else None
-                )
+                if isinstance(msg_date, str):
+                    try:
+                        msg_date = datetime.fromisoformat(msg_date.replace("Z", "+00:00"))
+                        timestamp_str = msg_date.strftime("%Y-%m-%d %H:%M:%S")
+                    except:
+                        timestamp_str = msg_date
+                elif msg_date:
+                    timestamp_str = msg_date.strftime("%Y-%m-%d %H:%M:%S") if hasattr(msg_date, 'strftime') else str(msg_date)
+                else:
+                    timestamp_str = None
                 
-                # Отображаем в UI
-                msg_data = {
-                    'text': msg.text or '',
-                    'sender_name': sender_name,
-                    'is_outgoing': msg.out,
-                    'timestamp': msg.date.strftime("%Y-%m-%d %H:%M:%S") if hasattr(msg, 'date') and msg.date else None,
-                    'first_name': sender_name
-                }
-                # Используем invokeLater для безопасного обновления UI из другого потока
-                from PyQt5.QtCore import QTimer
+                self.db.save_message(chat_id=str(chat_id), message_id=msg_id, sender_id=sender_id, text=msg_text, is_outgoing=1 if is_outgoing else 0)
+                msg_data = {"text": msg_text, "sender_name": sender_name, "is_outgoing": is_outgoing, "timestamp": timestamp_str, "first_name": sender_name}
                 QTimer.singleShot(0, lambda m=msg_data: self.display_message(m))
-                
-                # Небольшая пауза между сообщениями для предотвращения блокировки UI
                 await asyncio.sleep(0.01)
-                
         except Exception as e:
-            logger.error(f"Error loading Telegram history: {e}")
+            logger.error("Error loading Telegram history: %s", e)
 
     def display_message(self, msg):
-        """Красивое отображение сообщений в стиле Telegram"""
-        cursor = self.messages_area.textCursor()
-        cursor.movePosition(QTextCursor.End)
-        
-        # Корректная обработка is_outgoing из БД (может быть int, bool, None)
-        is_outgoing_val = msg.get('is_outgoing', 0)
-        if is_outgoing_val is None:
-            is_outgoing_val = 0
-        is_out = bool(is_outgoing_val)
-        
-        # Стиль для входящих и исходящих сообщений
-        if is_out:
-            # Исходящее сообщение - справа, синее
-            bg_color = "#e3f2fd"
-            align = "right"
-            sender_name = "You"
-            avatar_color = "#3390ec"
-        else:
-            # Входящее сообщение - слева, белое
-            bg_color = "#ffffff"
-            align = "left"
-            sender_name = msg.get('first_name', msg.get('sender_name', 'Unknown'))
-            avatar_color = "#4caf50"
-        
-        text = msg.get('text', '') or ''
-        # Экранируем HTML спецсимволы
-        text = text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-        
-        timestamp = ""
-        if 'timestamp' in msg and msg['timestamp']:
-            try:
-                ts = msg['timestamp']
-                if isinstance(ts, str):
-                    # Пробуем разные форматы
-                    for fmt in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"]:
-                        try:
-                            dt = datetime.strptime(ts[:19], fmt)
-                            timestamp = dt.strftime("%H:%M")
-                            break
-                        except:
-                            continue
-                    else:
-                        timestamp = datetime.now().strftime("%H:%M")
-                else:
-                    timestamp = datetime.now().strftime("%H:%M")
-            except:
-                timestamp = datetime.now().strftime("%H:%M")
-        elif 'date' in msg and msg['date']:
-            try:
-                if isinstance(msg['date'], str):
-                    dt = datetime.fromisoformat(msg['date'].replace('Z', '+00:00'))
-                else:
-                    dt = msg['date']
-                timestamp = dt.strftime("%H:%M")
-            except:
-                timestamp = datetime.now().strftime("%H:%M")
-        else:
-            timestamp = datetime.now().strftime("%H:%M")
-        
-        # Первая буква имени для аватара
-        avatar_letter = sender_name[0].upper() if sender_name else "?"
-        
-        html = f"""
-        <div style="margin:8px 0; display:flex; {'justify-content:flex-end;' if align == 'right' else 'justify-content:flex-start;'}">
-            {'<div style="width:36px;"></div>' if align == 'right' else f'<div style="width:40px; height:40px; border-radius:50%; background:{avatar_color}; color:white; display:flex; align-items:center; justify-content:center; font-weight:bold; margin-right:8px;">{avatar_letter}</div>'}
-            <div style="max-width:70%;">
-                {'<div style="font-size:11px; color:#888; text-align:right; margin-bottom:3px;">' + sender_name + '</div>' if align == 'right' else ''}
-                <div style="padding:10px 14px; border-radius:18px; background:{bg_color}; box-shadow:0 1px 3px rgba(0,0,0,0.12);">
-                    <div style="font-size:14px; color:#333; line-height:1.4;">{text}</div>
-                    <div style="font-size:11px; color:#999; text-align:right; margin-top:4px;">{timestamp}</div>
-                </div>
-            </div>
-            {'<div style="width:40px;"></div>' if align == 'left' else ''}
-        </div>
-        """
-        
-        media_path = msg.get('media_path')
-        if media_path and os.path.exists(str(media_path)):
-            html += f'<div style="margin:5px 0;"><a href="file://{media_path}" style="color:#3390ec;">📎 Open file</a></div>'
-        
-        self.messages_area.insertHtml(html)
-        self.messages_area.ensureCursorVisible()
-
-    def send_message(self):
-        if not self.current_chat_id:
-            QMessageBox.warning(self, "Warning", "Select a chat first")
-            return
-        text = self.message_input.text().strip()
+        text = msg.get("text", "")
         if not text:
             return
-        self.telegram_thread.send_message(int(self.current_chat_id), text)
-        import time
+        sender_name = msg.get("sender_name", msg.get("first_name", "Unknown"))
+        is_outgoing = bool(msg.get("is_outgoing", 0))
+        timestamp = msg.get("timestamp", "")
+        self.messages_scroll.add_message(text, sender_name, is_outgoing, timestamp)
+
+    def send_message(self):
+        text = self.message_input.text().strip()
+        if not text or not self.current_chat_id:
+            return
+        self.message_input.clear()
+        self.display_message({"text": text, "sender_name": "You", "is_outgoing": True, "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
+        if self.telegram_thread:
+            self.telegram_thread.send_message(int(self.current_chat_id), text)
+        # Исправлено: приведены параметры к сигнатуре Database.save_message()
         self.db.save_message(
             chat_id=self.current_chat_id,
-            message_id=int(time.time()),
+            message_id=int(time.time() * 1000),
             sender_id=0,
             text=text,
             is_outgoing=1
         )
-        self.display_message({'text': text, 'sender_name': 'You', 'is_outgoing': True})
-        self.message_input.clear()
 
     def attach_file(self):
-        if not self.current_chat_id:
-            QMessageBox.warning(self, "Warning", "Select a chat first")
-            return
-        path, _ = QFileDialog.getOpenFileName(self, "Select file")
-        if path:
-            self.telegram_thread.send_message(int(self.current_chat_id), "", path)
+        file_path, _ = QFileDialog.getOpenFileName(self, "Select File", "", "All Files (*)")
+        if file_path and self.current_chat_id:
+            if self.telegram_thread:
+                self.telegram_thread.send_message(int(self.current_chat_id), "", file_path)
+
+    def show_notification(self, msg):
+        if self.current_chat_id != msg["chat_id"]:
+            try:
+                notification.notify(title=msg.get("sender_name", "New Message"), message=msg.get("text", "")[:200], app_name="Telegram Messenger", timeout=5)
+            except Exception as e:
+                logger.debug("Notification error: %s", e)
+
+    def refresh_chat_list(self):
+        dialogs = list(self.dialogs_cache.values())
+        self.on_dialogs_received(dialogs)
 
     def closeEvent(self, event):
-        """Корректное завершение работы приложения"""
-        if self.message_worker:
-            self.message_worker.stop()
-            self.message_worker.quit()
-            self.message_worker.wait(1000)
-        
         if self.telegram_thread:
             self.telegram_thread.stop()
-            self.telegram_thread.quit()
-            self.telegram_thread.wait(2000)
-        
-        self.db.close()
+            self.telegram_thread.wait(3000)
         event.accept()
+
+
+if __name__ == "__main__":
+    API_ID = 123456
+    API_HASH = "your_api_hash"
+    
+    app = QApplication(sys.argv)
+    app.setStyle("Fusion")
+    font = QFont("Segoe UI", 10)
+    app.setFont(font)
+    
+    window = ChatApp(API_ID, API_HASH)
+    window.show()
+    sys.exit(app.exec_())

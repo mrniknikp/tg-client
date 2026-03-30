@@ -124,24 +124,24 @@ class TelegramClientWrapper:
             message = event.message
             sender = await event.get_sender()
             chat = await event.get_chat()
-            sender_name = getattr(sender, 'first_name', 'Unknown')
-            sender_username = getattr(sender, 'username', '')
+            sender_name = getattr(sender, 'first_name', 'Unknown') if sender else 'Unknown'
+            sender_username = getattr(sender, 'username', '') if sender else ''
             media_path = None
             media_type = None
             if message.media:
                 media_path, media_type = await self.download_media(message)
             if self.message_callback:
                 await self.message_callback({
-                    'id': message.id,
-                    'chat_id': str(chat.id),
-                    'chat_title': getattr(chat, 'title', sender_name),
-                    'sender_id': sender.id,
+                    'id': getattr(message, 'id', None),
+                    'chat_id': str(getattr(chat, 'id', 0)),
+                    'chat_title': getattr(chat, 'title', sender_name) if chat else sender_name,
+                    'sender_id': getattr(sender, 'id', 0) if sender else 0,
                     'sender_name': sender_name,
                     'sender_username': sender_username,
-                    'text': message.text or '',
+                    'text': getattr(message, 'text', '') or '',
                     'media_path': media_path,
                     'media_type': media_type,
-                    'is_outgoing': message.out
+                    'is_outgoing': getattr(message, 'out', False)
                 })
         except Exception as e:
             logger.error(f"Error handling message: {e}")
@@ -177,10 +177,10 @@ class TelegramClientWrapper:
             for dialog in dialogs:
                 try:
                     result.append({
-                        'id': dialog.id,
-                        'name': dialog.name,
-                        'unread_count': dialog.unread_count,
-                        'message': getattr(dialog.message, 'text', '') if dialog.message else ''
+                        'id': getattr(dialog, 'id', None),
+                        'name': getattr(dialog, 'name', 'Unknown'),
+                        'unread_count': getattr(dialog, 'unread_count', 0),
+                        'message': getattr(getattr(dialog, 'message', None), 'text', '') if dialog.message else ''
                     })
                 except Exception as e:
                     logger.error(f"Error processing dialog {dialog}: {e}")
@@ -197,13 +197,16 @@ class TelegramClientWrapper:
         entity = await self.client.get_entity(chat_id)
         messages = []
         async for message in self.client.iter_messages(entity, limit=limit):
+            sender = await message.get_sender()
+            sender_name = getattr(sender, 'first_name', 'Unknown') if sender else 'Unknown'
             messages.append({
-                'id': message.id,
-                'text': message.text or '',
-                'sender_id': message.sender_id,
-                'date': message.date.isoformat(),
-                'media': bool(message.media),
-                'is_outgoing': message.out
+                'id': getattr(message, 'id', None),
+                'text': getattr(message, 'text', '') or '',
+                'sender_id': getattr(message, 'sender_id', 0),
+                'sender_name': sender_name,
+                'date': getattr(message, 'date', None).isoformat() if getattr(message, 'date', None) else None,
+                'media': bool(getattr(message, 'media', None)),
+                'is_outgoing': getattr(message, 'out', False)
             })
         return messages
 
