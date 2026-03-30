@@ -151,6 +151,7 @@ class TelegramThread(QThread):
         self.api_hash = api_hash
         self.phone = phone
         self.client = TelegramClientWrapper(api_id, api_hash)
+        self.db = Database()  # Добавляем доступ к БД
         self.loop = None
         self.code = None
         self.password = None
@@ -234,7 +235,38 @@ class TelegramThread(QThread):
             await asyncio.sleep(0.5)
 
     async def on_message(self, message):
-        self.message_received.emit(message)
+        """Обработчик входящих сообщений - сохраняет в БД и отправляет в GUI"""
+        try:
+            chat_id = str(message.get('chat_id', 0))
+            
+            # Сохраняем сообщение в базу данных
+            self.db.save_message(
+                chat_id=chat_id,
+                message_id=message.get('id', 0),
+                sender_id=message.get('sender_id', 0),
+                text=message.get('text', ''),
+                media_path=message.get('media_path', ''),
+                media_type=message.get('media_type', ''),
+                is_outgoing=1 if message.get('is_outgoing', False) else 0
+            )
+            
+            # Обновляем информацию о чате
+            timestamp = datetime.now().isoformat()
+            self.db.update_chat_last_message(
+                chat_id, 
+                message.get('text', '')[:100] or '[Медиа]', 
+                timestamp
+            )
+            
+            # Увеличиваем счётчик непрочитанных если это не текущий чат
+            if not message.get('is_outgoing', False) and self.current_chat_id != chat_id:
+                self.db.increment_unread_count(chat_id)
+            
+            # Отправляем в GUI для отображения
+            self.message_received.emit(message)
+            
+        except Exception as e:
+            logger.error(f"Error in on_message handler: {e}")
 
     def send_message(self, chat_id, text, file_path=None):
         if self.loop and self.client.client:
@@ -485,7 +517,14 @@ class ChatApp(QMainWindow):
 
     async def _fetch_telegram_history(self, chat_id):
         try:
-            messages = await self.telegram_thread.client.get_chat_history(chat_id, limit=100)
+            # Получаем больше истории для полной синхронизации
+            messages = await self.telegram_thread.client.get_chat_history(chat_id, limit=500)
+            
+            # Проверяем какие сообщения уже есть в БД
+            db_existing = self.db.get_chat_history(chat_id, limit=1000)
+            existing_ids = {msg.get('id') for msg in db_existing if msg.get('id')}
+            
+            saved_count = 0
             for msg in reversed(messages):
                 sender_name = msg.get("sender_name", "Unknown")
                 sender_id = msg.get("sender_id", 0)
@@ -493,6 +532,10 @@ class ChatApp(QMainWindow):
                 msg_text = msg.get("text", "")
                 is_outgoing = msg.get("is_outgoing", False)
                 msg_date = msg.get("date")
+                
+                # Пропускаем уже сохранённые
+                if msg_id in existing_ids:
+                    continue
                 
                 if isinstance(msg_date, str):
                     try:
@@ -514,9 +557,17 @@ class ChatApp(QMainWindow):
                     "",
                     1 if is_outgoing else 0
                 )
-                msg_data = {"text": msg_text, "sender_name": sender_name, "is_outgoing": is_outgoing, "timestamp": timestamp_str, "first_name": sender_name}
-                QTimer.singleShot(0, lambda m=msg_data: self.display_message(m))
-                await asyncio.sleep(0.01)
+                saved_count += 1
+                
+                # Показываем только если это текущий открытый чат
+                if chat_id == self.current_chat_id:
+                    msg_data = {"text": msg_text, "sender_name": sender_name, "is_outgoing": is_outgoing, "timestamp": timestamp_str, "first_name": sender_name}
+                    QTimer.singleShot(0, lambda m=msg_data: self.display_message(m))
+                
+                await asyncio.sleep(0.005)  # Быстрее, но без перегрузки
+            
+            logger.info(f"Синхронизировано {saved_count} новых сообщений для чата {chat_id}")
+            
         except Exception as e:
             logger.error("Error loading Telegram history: %s", e)
 

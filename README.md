@@ -2,6 +2,47 @@
 
 Professional cross-platform desktop messenger built with PyQt5 and Telethon, featuring real-time chat updates, beautiful UI, and Windows native notifications.
 
+## 🆕 New: Background Service for 24/7 Message Sync
+
+Now you can run a background service that captures ALL messages even when the GUI is closed!
+
+### Quick Start
+
+**Option 1: Background Service (Recommended)**
+```bash
+python background_service.py
+```
+- Runs 24/7 in the background
+- Saves ALL incoming/outgoing messages to database
+- Works independently of GUI
+- Press Ctrl+C to stop
+
+**Option 2: GUI Application**
+```bash
+python main.py
+```
+- Beautiful Telegram-like interface
+- Loads history from database on startup
+- Fetches up to 500 messages per chat from Telegram
+- All new messages saved to database
+
+## How It Works
+
+1. **Background service** runs constantly and saves every message to `chat_history.db`
+2. **GUI app** loads all messages from database on startup
+3. When you open a chat, GUI fetches additional history from Telegram (up to 500 messages)
+4. New messages are duplicated to database for persistence
+
+## Benefits
+
+✅ Messages captured 24/7 even when GUI is off
+✅ Full history available immediately on app launch
+✅ No message loss
+✅ Fast GUI performance (reads from local DB)
+✅ Multiple clients can share the same database
+
+---
+
 ## Features
 
 - 💬 **Real-time messaging** - Send and receive text messages instantly
