@@ -404,7 +404,15 @@ class ChatApp(QMainWindow):
 
     def on_message_received(self, msg):
         logger.info("Message received: %s", msg.get("text", "")[:50])
-        self.db.save_message(chat_id=msg["chat_id"], message_id=msg["id"], sender_id=msg.get("sender_id", 0), text=msg.get("text", ""), is_outgoing=0)
+        self.db.save_message(
+            str(msg["chat_id"]),
+            msg["id"],
+            msg.get("sender_id", 0),
+            msg.get("text", ""),
+            "",
+            "",
+            0
+        )
         if self.current_chat_id != msg["chat_id"]:
             self.db.increment_unread_count(msg["chat_id"])
         self.show_notification(msg)
@@ -497,7 +505,15 @@ class ChatApp(QMainWindow):
                 else:
                     timestamp_str = None
                 
-                self.db.save_message(chat_id=str(chat_id), message_id=msg_id, sender_id=sender_id, text=msg_text, is_outgoing=1 if is_outgoing else 0)
+                self.db.save_message(
+                    str(chat_id),
+                    msg_id,
+                    sender_id,
+                    msg_text,
+                    "",
+                    "",
+                    1 if is_outgoing else 0
+                )
                 msg_data = {"text": msg_text, "sender_name": sender_name, "is_outgoing": is_outgoing, "timestamp": timestamp_str, "first_name": sender_name}
                 QTimer.singleShot(0, lambda m=msg_data: self.display_message(m))
                 await asyncio.sleep(0.01)
@@ -521,13 +537,15 @@ class ChatApp(QMainWindow):
         self.display_message({"text": text, "sender_name": "You", "is_outgoing": True, "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
         if self.telegram_thread:
             self.telegram_thread.send_message(int(self.current_chat_id), text)
-        # Исправлено: приведены параметры к сигнатуре Database.save_message()
+        # Исправлено: параметры строго соответствуют сигнатуре Database.save_message(chat_id, message_id, sender_id, text, media_path, media_type, is_outgoing)
         self.db.save_message(
-            chat_id=self.current_chat_id,
-            message_id=int(time.time() * 1000),
-            sender_id=0,
-            text=text,
-            is_outgoing=1
+            str(self.current_chat_id),  # chat_id
+            int(time.time() * 1000),    # message_id
+            0,                          # sender_id (0 для исходящих от текущего пользователя)
+            text,                       # text
+            "",                         # media_path (пусто для текста)
+            "",                         # media_type (пусто для текста)
+            1                           # is_outgoing (1 = True)
         )
 
     def attach_file(self):
