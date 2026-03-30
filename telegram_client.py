@@ -3,7 +3,7 @@ import os
 from telethon import TelegramClient, events
 from telethon.errors import (
     SessionPasswordNeededError, RPCError, PhoneCodeInvalidError,
-    PasswordHashInvalidError
+    PasswordHashInvalidError, AuthRestartError
 )
 from telethon.network.connection.tcpmtproxy import ConnectionTcpMTProxyRandomizedIntermediate
 import logging
@@ -58,7 +58,16 @@ class TelegramClientWrapper:
                             await self.client.sign_in(phone, code)
                             break  # Код верен, выходим из цикла
                         except PhoneCodeInvalidError:
+                            # Освобождаем событие для повторного запроса кода
                             raise Exception("CODE_INVALID")
+                        except AuthRestartError:
+                            # Требуется перезапуск процесса авторизации
+                            logger.warning("AuthRestartError received, restarting authorization...")
+                            await self.client.disconnect()
+                            await asyncio.sleep(1)
+                            await self.client.connect()
+                            await self.client.send_code_request(phone)
+                            continue  # Пробуем снова
                         except SessionPasswordNeededError:
                             # Требуется двухфакторный пароль
                             if not password_callback:
@@ -71,6 +80,16 @@ class TelegramClientWrapper:
                                     break  # Пароль верен, выходим
                                 except PasswordHashInvalidError:
                                     raise Exception("PASSWORD_INVALID")
+                                except AuthRestartError:
+                                    logger.warning("AuthRestartError during password auth, restarting...")
+                                    await self.client.disconnect()
+                                    await asyncio.sleep(1)
+                                    await self.client.connect()
+                                    await self.client.send_code_request(phone)
+                                    # Возвращаемся к запросу кода
+                                    break
+                            else:
+                                continue  # После AuthRestartError продолжаем внешний цикл
                             break  # После успешного ввода пароля выходим из внешнего цикла
 
                 @self.client.on(events.NewMessage)
@@ -86,6 +105,14 @@ class TelegramClientWrapper:
                 if attempt == self.connection_retries:
                     raise Exception(f"Connection failed: {e}")
                 await asyncio.sleep(self.retry_delay)
+            except AuthRestartError as e:
+                logger.warning(f"AuthRestartError: {e}, restarting authorization...")
+                if self.client and self.client.is_connected():
+                    await self.client.disconnect()
+                await asyncio.sleep(2)
+                if attempt == self.connection_retries:
+                    raise Exception(f"Auth restart failed after {attempt} attempts")
+                continue  # Пробуем снова
             except Exception as e:
                 if str(e) in ("CODE_INVALID", "PASSWORD_INVALID", "PASSWORD_REQUIRED"):
                     raise  # Пробрасываем дальше для обработки в GUI
@@ -138,16 +165,31 @@ class TelegramClientWrapper:
         else:
             await self.client.send_message(entity, text)
 
-    async def get_dialogs(self):
+    async def get_dialogs(self, limit: int = 50):
+        """Получение списка диалогов с ограничением для предотвращения flood wait"""
         if not self.client:
+            logger.warning("Telegram client not initialized")
             return []
-        dialogs = await self.client.get_dialogs()
-        return [{
-            'id': dialog.id,
-            'name': dialog.name,
-            'unread_count': dialog.unread_count,
-            'message': getattr(dialog.message, 'text', '') if dialog.message else ''
-        } for dialog in dialogs]
+        try:
+            # Ограничиваем количество диалогов для уменьшения нагрузки
+            dialogs = await self.client.get_dialogs(limit=limit)
+            result = []
+            for dialog in dialogs:
+                try:
+                    result.append({
+                        'id': dialog.id,
+                        'name': dialog.name,
+                        'unread_count': dialog.unread_count,
+                        'message': getattr(dialog.message, 'text', '') if dialog.message else ''
+                    })
+                except Exception as e:
+                    logger.error(f"Error processing dialog {dialog}: {e}")
+                    continue
+            logger.info(f"Fetched {len(result)} dialogs")
+            return result
+        except Exception as e:
+            logger.error(f"Error getting dialogs: {e}")
+            return []
 
     async def get_chat_history(self, chat_id: int, limit: int = 100):
         if not self.client:

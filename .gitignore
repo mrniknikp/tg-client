@@ -1,0 +1,34 @@
+```
+# Database files
+*.db
+
+# Environment variables
+.env
+.env.local
+*.env.*
+
+# Python specific
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+.venv*/
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.log
+*.sqlite
+*.sqlite3
+.DS_Store
+Thumbs.db
+```
