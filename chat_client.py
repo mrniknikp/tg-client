@@ -287,14 +287,15 @@ class TelegramThread(QThread):
 
 
 class ChatApp(QMainWindow):
-    def __init__(self, api_id, api_hash):
+    def __init__(self, api_id, api_hash, db=None):
         super().__init__()
         self.api_id = api_id
         self.api_hash = api_hash
-        self.db = Database()
+        self.db = db if db else Database()
         self.telegram_thread = None
         self.current_chat_id = None
         self.dialogs_cache = {}
+        self.account_id = self.db.get_active_account()['id'] if self.db.get_active_account() else None
         self.init_ui()
         QTimer.singleShot(100, self.start_login)
 
@@ -303,6 +304,9 @@ class ChatApp(QMainWindow):
         self.setGeometry(100, 100, 1400, 900)
         self.setMinimumSize(1200, 800)
         self.setStyleSheet("QMainWindow { background-color: #ffffff; }")
+        
+        # Создаем меню
+        self.create_menu_bar()
         
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -321,6 +325,26 @@ class ChatApp(QMainWindow):
         splitter.addWidget(right_panel)
         
         splitter.setSizes([400, 1000])
+
+    def create_menu_bar(self):
+        menubar = self.menuBar()
+        menubar.setStyleSheet("QMenuBar { background-color: #ffffff; border-bottom: 1px solid #e8e8e8; } QMenuBar::item:selected { background-color: #f0f0f0; }")
+        
+        # Меню "Аккаунты"
+        accounts_menu = menubar.addMenu("Аккаунты")
+        
+        switch_action = accounts_menu.addAction("Переключить аккаунт")
+        switch_action.triggered.connect(self.show_account_switcher)
+        
+        add_action = accounts_menu.addAction("Добавить аккаунт")
+        add_action.triggered.connect(self.show_add_account_dialog)
+        
+        accounts_menu.addSeparator()
+        
+        # Индикатор текущего аккаунта
+        self.current_account_label = accounts_menu.addAction("Текущий: Загрузка...")
+        self.current_account_label.setEnabled(False)
+        self.update_current_account_label()
 
     def create_left_panel(self):
         widget = QWidget()
@@ -443,7 +467,8 @@ class ChatApp(QMainWindow):
             msg.get("text", ""),
             "",
             "",
-            0
+            0,
+            self.account_id
         )
         if self.current_chat_id != msg["chat_id"]:
             self.db.increment_unread_count(msg["chat_id"])
@@ -508,7 +533,7 @@ class ChatApp(QMainWindow):
         self.chat_avatar.setText(chat_name[0].upper() if chat_name else "?")
         self.messages_scroll.clear_messages()
         self.db.reset_unread_count(chat_id)
-        db_messages = self.db.get_chat_history(chat_id, limit=100)
+        db_messages = self.db.get_chat_history(chat_id, limit=100, account_id=self.account_id)
         for msg in db_messages:
             self.display_message(msg)
         if self.telegram_thread and self.telegram_thread.loop:
@@ -521,7 +546,7 @@ class ChatApp(QMainWindow):
             messages = await self.telegram_thread.client.get_chat_history(chat_id, limit=500)
             
             # Проверяем какие сообщения уже есть в БД
-            db_existing = self.db.get_chat_history(chat_id, limit=1000)
+            db_existing = self.db.get_chat_history(chat_id, limit=1000, account_id=self.account_id)
             existing_ids = {msg.get('id') for msg in db_existing if msg.get('id')}
             
             saved_count = 0
@@ -555,7 +580,8 @@ class ChatApp(QMainWindow):
                     msg_text,
                     "",
                     "",
-                    1 if is_outgoing else 0
+                    1 if is_outgoing else 0,
+                    self.account_id
                 )
                 saved_count += 1
                 
@@ -588,7 +614,7 @@ class ChatApp(QMainWindow):
         self.display_message({"text": text, "sender_name": "You", "is_outgoing": True, "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
         if self.telegram_thread:
             self.telegram_thread.send_message(int(self.current_chat_id), text)
-        # Исправлено: параметры строго соответствуют сигнатуре Database.save_message(chat_id, message_id, sender_id, text, media_path, media_type, is_outgoing)
+        # Исправлено: параметры строго соответствуют сигнатуре Database.save_message(chat_id, message_id, sender_id, text, media_path, media_type, is_outgoing, account_id)
         self.db.save_message(
             str(self.current_chat_id),  # chat_id
             int(time.time() * 1000),    # message_id
@@ -596,7 +622,8 @@ class ChatApp(QMainWindow):
             text,                       # text
             "",                         # media_path (пусто для текста)
             "",                         # media_type (пусто для текста)
-            1                           # is_outgoing (1 = True)
+            1,                          # is_outgoing (1 = True)
+            self.account_id             # account_id
         )
 
     def attach_file(self):
@@ -615,6 +642,144 @@ class ChatApp(QMainWindow):
     def refresh_chat_list(self):
         dialogs = list(self.dialogs_cache.values())
         self.on_dialogs_received(dialogs)
+
+    def update_current_account_label(self):
+        """Обновить отображение текущего аккаунта в меню"""
+        active_account = self.db.get_active_account()
+        if active_account:
+            account_name = active_account.get('account_name', 'Unknown')
+            phone = active_account.get('phone', '')
+            self.current_account_label.setText(f"Текущий: {account_name} ({phone})")
+        else:
+            self.current_account_label.setText("Текущий: Не выбран")
+
+    def show_add_account_dialog(self):
+        """Диалог добавления нового аккаунта"""
+        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QLabel, QLineEdit, QPushButton, QFormLayout
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Добавление аккаунта Telegram")
+        dialog.setMinimumWidth(400)
+        
+        layout = QVBoxLayout(dialog)
+        
+        intro_label = QLabel("Добавьте новый аккаунт Telegram.\n\n"
+                           "Получите API_ID и API_HASH на сайте my.telegram.org")
+        intro_label.setWordWrap(True)
+        layout.addWidget(intro_label)
+        
+        form_layout = QFormLayout()
+        
+        account_name_input = QLineEdit()
+        account_name_input.setPlaceholderText("Например: Личный, Рабочий")
+        form_layout.addRow("Название аккаунта:", account_name_input)
+        
+        api_id_input = QLineEdit()
+        api_id_input.setPlaceholderText("Число, например: 1234567")
+        form_layout.addRow("API_ID:", api_id_input)
+        
+        api_hash_input = QLineEdit()
+        api_hash_input.setPlaceholderText("Строка, например: abc123def456")
+        form_layout.addRow("API_HASH:", api_hash_input)
+        
+        phone_input = QLineEdit()
+        phone_input.setPlaceholderText("+79991234567")
+        form_layout.addRow("Номер телефона:", phone_input)
+        
+        layout.addLayout(form_layout)
+        
+        btn_layout = QVBoxLayout()
+        save_btn = QPushButton("Сохранить")
+        save_btn.setStyleSheet("QPushButton { background-color: #3390ec; color: white; padding: 10px; border-radius: 5px; font-weight: bold; }")
+        btn_layout.addWidget(save_btn)
+        layout.addLayout(btn_layout)
+        
+        def on_save():
+            account_name = account_name_input.text().strip()
+            api_id_str = api_id_input.text().strip()
+            api_hash = api_hash_input.text().strip()
+            phone = phone_input.text().strip()
+            
+            if not account_name or not api_id_str or not api_hash or not phone:
+                QMessageBox.warning(dialog, "Ошибка", "Заполните все поля!")
+                return
+            
+            try:
+                api_id = int(api_id_str)
+            except ValueError:
+                QMessageBox.warning(dialog, "Ошибка", "API_ID должен быть числом!")
+                return
+            
+            if len(phone) < 10 or not phone.startswith('+'):
+                QMessageBox.warning(dialog, "Ошибка", "Введите корректный номер телефона (начинается с +)!")
+                return
+            
+            try:
+                session_name = f"session_{account_name.replace(' ', '_').lower()}"
+                account_id = self.db.create_account(account_name, api_id, api_hash, phone, session_name)
+                
+                reply = QMessageBox.question(dialog, "Аккаунт сохранен", 
+                                           f"Аккаунт '{account_name}' успешно добавлен!\n\n"
+                                           f"Хотите переключиться на этот аккаунт сейчас?",
+                                           QMessageBox.Yes | QMessageBox.No)
+                
+                if reply == QMessageBox.Yes:
+                    self.switch_to_account(account_id)
+                
+                dialog.accept()
+            except Exception as e:
+                QMessageBox.critical(dialog, "Ошибка", f"Не удалось сохранить аккаунт: {e}")
+        
+        save_btn.clicked.connect(on_save)
+        dialog.exec_()
+
+    def show_account_switcher(self):
+        """Диалог переключения между аккаунтами"""
+        accounts = self.db.get_all_accounts()
+        
+        if not accounts:
+            QMessageBox.information(self, "Нет аккаунтов", "У вас пока нет сохраненных аккаунтов.")
+            return
+        
+        # Создаем список аккаунтов для выбора
+        account_names = []
+        for acc in accounts:
+            is_active = " (текущий)" if acc.get('is_active', 0) else ""
+            account_names.append(f"{acc['account_name']} - {acc['phone']}{is_active}")
+        
+        item, ok = QInputDialog.getItem(self, "Переключение аккаунта", 
+                                        "Выберите аккаунт для переключения:",
+                                        account_names, 0, False)
+        
+        if ok and item:
+            # Находим выбранный аккаунт
+            selected_name = item.split(" - ")[0]
+            for acc in accounts:
+                if acc['account_name'] == selected_name:
+                    if acc.get('is_active', 0):
+                        QMessageBox.information(self, "Информация", "Этот аккаунт уже активен.")
+                    else:
+                        self.switch_to_account(acc['id'])
+                    break
+
+    def switch_to_account(self, account_id: int):
+        """Переключение на другой аккаунт"""
+        account = self.db.get_account_by_id(account_id)
+        if not account:
+            QMessageBox.critical(self, "Ошибка", "Аккаунт не найден!")
+            return
+        
+        # Предупреждение о перезапуске
+        reply = QMessageBox.question(self, "Переключение аккаунта",
+                                   f"Для переключения на аккаунт '{account['account_name']}' требуется перезапуск приложения.\n\n"
+                                   "Перезапустить сейчас?",
+                                   QMessageBox.Yes | QMessageBox.No)
+        
+        if reply == QMessageBox.Yes:
+            self.db.set_active_account(account_id)
+            # Перезапуск приложения
+            import os
+            os.execl(sys.executable, sys.executable, *sys.argv)
 
     def closeEvent(self, event):
         if self.telegram_thread:
