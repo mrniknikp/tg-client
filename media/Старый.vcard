@@ -1,0 +1,6 @@
+BEGIN:VCARD
+VERSION:4.0
+N:Старый;;;;
+FN:Старый 
+TEL;TYPE=cell;VALUE=uri:tel:+79150042420
+END:VCARD
